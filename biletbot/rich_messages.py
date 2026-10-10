@@ -3,7 +3,7 @@ import json
 from urllib.parse import urlencode
 
 from .boarding_pass import boarding_pass
-from .messages import (LABELS, baggage_text, duration_text, human_date, price_text,
+from .messages import (LABELS, airline_text, baggage_text, duration_text, human_date, price_text,
                        select_tickets, transfer_text)
 
 
@@ -38,7 +38,7 @@ def rich_blocks(search, tickets, marker, title=None):
             dates += " — " + human_date(ticket["return_at"]).rsplit(" ", 1)[0]
         duration = duration_text(ticket).replace("туда ", "").replace(", обратно ", " / ")
         info = (dates + "\n" + transfer_text(ticket) + "\nВ пути " + duration
-                + "\n" + baggage_text(ticket.get("baggage_code")))
+                + "\n" + baggage_text(ticket.get("baggage_code")) + "\n" + airline_text(ticket))
         if ticket.get("destination_name") or ticket.get("origin_name"):
             info = (ticket.get("origin_name", search.origin_name) + " — "
                     + ticket.get("destination_name", search.destination_name) + "\n" + info)
@@ -84,7 +84,8 @@ async def send_search_results(api, chat_id, results):
             blocks.extend(rich_blocks(search, direct, api.config.marker, title=f"{trip} · Прямые рейсы"))
         label = "в одну сторону" if search.trip_type == "OW" else "туда-обратно"
         callback = f"track:{sid}:{round(min(float(t['value']) for t in flights))}" if tickets else f"custom:{sid}"
-        buttons.append([{"text": f"📉 Отслеживать {label}", "callback_data": callback}])
+        if not search.anywhere:
+            buttons.append([{"text": f"📉 Отслеживать {label}", "callback_data": callback}])
     blocks.append({"type": "footer", "text": " · ".join(LABELS[search.mode] for search, _, _ in results)})
     buttons.append([{"text": "Дополнить / изменить запрос", "callback_data": f"edit:{results[0][2]}"}])
     if first_search.query:

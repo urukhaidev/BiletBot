@@ -7,7 +7,7 @@ from datetime import date
 from pathlib import Path
 from typing import Literal
 
-from fastapi import Depends, FastAPI, Header, HTTPException
+from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, model_validator
@@ -15,7 +15,7 @@ from telegram import Bot
 
 from biletbot.api import API
 from biletbot.config import Config
-from biletbot.messages import baggage_text, duration_text, human_date, select_tickets, transfer_text, price_keyboard
+from biletbot.messages import airline_text, baggage_text, duration_text, human_date, select_tickets, transfer_text, price_keyboard
 from biletbot.models import Search
 from biletbot.rich_messages import send_search_results, ticket_url
 from biletbot.storage import Storage
@@ -63,7 +63,7 @@ def build_searches(form, origin, destination, today):
                 {"depart_date_min": period, "depart_date_max": form.range_end} if form.date_mode == "range"
                 else {"date_from": period, "date_to": form.returning if trip_type == "RT" else None})
             s = Search(origin=origin[0], origin_name=origin[1], destination=destination[0], destination_name=destination[1],
-                       trip_type=trip_type, direct=form.direct, baggage=form.baggage, max_changes=form.max_changes,
+                       trip_type=trip_type, anywhere=destination[0] == "ANY", direct=form.direct or (destination[0] == "ANY" and form.max_changes is None), baggage=form.baggage, max_changes=form.max_changes,
                        duration_min=form.duration_min, duration_max=form.duration_max, **dates)
             if s.last_departure() < today:
                 raise ValueError("Выберите будущие даты")
@@ -113,9 +113,14 @@ async def lifespan(app):
 app = FastAPI(lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
 
 
-def user(authorization: str = Header(default="")):
+async def user(request: Request, authorization: str = Header(default="")):
     try:
-        return authenticate(authorization.removeprefix("tma "), app.state.config.telegram_token)
+        me = authenticate(authorization.removeprefix("tma "), app.state.config.telegram_token)
+        if request.method in {"POST", "DELETE", "PUT", "PATCH"}:
+            wait = app.state.storage.request_wait(me["id"])
+            if wait:
+                raise HTTPException(429, f"Подождите {wait} сек. Между запросами — 10 секунд.", headers={"Retry-After": str(wait)})
+        return me
     except (ValueError, KeyError, TypeError):
         raise HTTPException(401, "Откройте мини-апп из Telegram или перезапустите его") from None
 
@@ -168,7 +173,10 @@ async def perform_search(job, form, uid, parsed=None):
             if parsed is not None:
                 searches = parsed.variants()
             else:
-                origin, destination = await asyncio.gather(api.resolve(form.origin), api.resolve(form.destination))
+                if form.destination.casefold().strip() in ("куда угодно", "любые", "any"):
+                    origin, destination = await api.resolve(form.origin), ("ANY", "Куда угодно")
+                else:
+                    origin, destination = await asyncio.gather(api.resolve(form.origin), api.resolve(form.destination))
                 searches = build_searches(form, origin, destination, api.today())
             results, groups = [], []
             for search in searches:
@@ -177,12 +185,15 @@ async def perform_search(job, form, uid, parsed=None):
                 results.append((search, flights, sid))
                 groups.append({"search_id": sid, "trip_type": search.trip_type, "query": search.query,
                     "origin_name": search.origin_name, "destination_name": search.destination_name,
-                    "month": search.month.isoformat() if search.month else None,
+                    "month": search.month.isoformat() if search.month else None, "anywhere": search.anywhere,
+                    "calendar_month": (search.month or search.date_from or search.depart_date_min).replace(day=1).isoformat(),
                     "tickets": [{"departure": human_date(t["departure_at"]),
                                  "returning": human_date(t["return_at"]) if t.get("return_at") else None,
+                                 "destination_name": t.get("destination_name", search.destination_name),
                                  "price": int(float(t["value"]) + .5), "baggage": baggage_text(t.get("baggage_code")),
                                   "duration": duration_text(t), "transfers": transfer_text(t),
                                   "direct": int(t["number_of_changes"]) == 0,
+                                  "airline": airline_text(t),
                                  "url": ticket_url(search, t, app.state.config.marker)} for t in select_tickets(search, flights)]})
             delivered = True
             try:
@@ -243,7 +254,12 @@ async def create_alert(body: AlertForm, me=Depends(user)):
 
 async def perform_ai(job, query, uid):
     try:
-        parsed = await app.state.api.parse(query)
+        try:
+            parsed = await app.state.api.parse(query)
+        except Exception as exc:
+            error = str(exc).replace(app.state.config.telegram_token, "[REDACTED]") if isinstance(exc, ValueError) else type(exc).__name__
+            app.state.storage.save_failed_query(uid, "mini-app-ai", query, error)
+            raise
         form = SearchForm(origin=parsed.origin_name, destination=parsed.destination_name,
             trip_type=parsed.trip_type if parsed.trip_type_explicit else "both",
             date_mode="months" if parsed.month else "dates" if parsed.date_from else "range",
@@ -277,6 +293,34 @@ async def result(jid: str, me=Depends(user)):
     if not job or job["user_id"] != me["id"]:
         raise HTTPException(404, "Поиск не найден")
     return {k: v for k, v in job.items() if k not in ("user_id", "created")}
+
+
+@app.get("/mini-app/api/calendar/{sid}")
+async def price_calendar(sid: int, month: date | None = None, me=Depends(user)):
+    try:
+        search = app.state.storage.get_search(sid, me["id"], me["id"])
+    except ValueError:
+        raise HTTPException(404, "Поиск не найден") from None
+    today = app.state.api.today()
+    month = month.replace(day=1) if month else max(
+        (search.month or search.date_from or search.depart_date_min).replace(day=1), today.replace(day=1))
+    if not today.replace(day=1) <= month <= today.replace(day=1, year=today.year + 2):
+        raise HTTPException(400, "Выберите месяц в пределах ближайших двух лет")
+    try:
+        async with app.state.semaphore:
+            tickets = await app.state.api.prices_for_dates(search, month)
+    except Exception as exc:
+        logging.warning("Mini-app price calendar failed: %s", type(exc).__name__)
+        raise HTTPException(502, "Не удалось загрузить календарь цен. Попробуйте ещё раз.") from None
+    return {"month": month.isoformat(), "today": today.isoformat(),
+            "origin_name": search.origin_name, "destination_name": search.destination_name,
+            "trip_type": search.trip_type, "direct": search.direct, "max_changes": search.max_changes,
+            "returning": search.date_to.isoformat() if search.date_to else None,
+            "duration_min": search.duration_min, "duration_max": search.duration_max,
+            "days": [{"date": t["departure_at"][:10], "price": int(float(t["value"]) + .5),
+                      "returning": t["return_at"][:10] if t.get("return_at") else None,
+                      "destination": t["destination_city_iata"],
+                      "url": ticket_url(search, t, app.state.config.marker)} for t in tickets]}
 
 
 @app.get("/mini-app/api/alerts")
@@ -346,6 +390,8 @@ async def track(sid: int, me=Depends(user)):
         search = store.get_search(sid, me["id"], me["id"])
     except ValueError:
         raise HTTPException(404, "Поиск не найден") from None
+    if search.anywhere:
+        raise HTTPException(400, "Отслеживание недоступно для поиска «Куда угодно». Выберите конкретное направление.")
     price = None
     import json
     rows = store.db.execute("SELECT result FROM mini_history WHERE user_id=? ORDER BY created_at DESC LIMIT 100", (me["id"],)).fetchall()
@@ -369,7 +415,7 @@ async def track(sid: int, me=Depends(user)):
 async def help_message(me=Depends(user)):
     from biletbot.__main__ import HELP
     try:
-        await app.state.bot.send_message(me["id"], HELP)
+        await app.state.bot.send_message(me["id"], HELP, parse_mode="HTML")
     except Exception:
         raise HTTPException(502, "Откройте бота и нажмите /start для получения инструкции") from None
     return {"ok": True}

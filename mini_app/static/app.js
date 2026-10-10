@@ -1,8 +1,16 @@
 const tg=window.Telegram?.WebApp;tg?.ready();tg?.expand();
 const $=s=>document.querySelector(s), esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-let dateMode='months',tripType='both',botName='dae110_bot',selectedMonths=new Set(),busy=false;
+let dateMode='months',tripType='both',botName='bilet_bot',selectedMonths=new Set(),busy=false;
 const initData=tg?.initData||'';
-async function api(path,options={}){const response=await fetch('/mini-app/api/'+path,{...options,headers:{'Authorization':'tma '+initData,'Content-Type':'application/json',...options.headers}});const data=await response.json();if(!response.ok){const msg=Array.isArray(data.detail)?data.detail.map(d=>d.msg).join('; '):data.detail;throw new Error(msg||'Ошибка сервиса')}return data}
+async function api(path,options={}){
+  const response=await fetch('/mini-app/api/'+path,{...options,headers:{'Authorization':'tma '+initData,'Content-Type':'application/json',...options.headers}});
+  let data;
+  try{data=await response.json()}catch{
+    throw new Error(response.ok?'Сервис вернул некорректный ответ. Попробуйте ещё раз.':`Ошибка сервиса (${response.status}). Попробуйте ещё раз.`);
+  }
+  if(!response.ok){const msg=Array.isArray(data?.detail)?data.detail.map(d=>d.msg).join('; '):data?.detail;throw new Error(msg||`Ошибка сервиса (${response.status}). Попробуйте ещё раз.`)}
+  return data;
+}
 function status(message,error=false){$('#status').textContent=message;$('#status').className='status'+(error?' error':'')}
 function openBot(){const url='https://t.me/'+botName;if(initData)tg.openTelegramLink(url);else window.open(url,'_blank','noopener')}
 document.querySelectorAll('.to-bot').forEach(b=>b.onclick=openBot);

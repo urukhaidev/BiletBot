@@ -1,4 +1,16 @@
 let searchMode='form';
+const originalDateSummary=updateDateSummary;
+updateDateSummary=function(){
+  originalDateSummary();
+  if(dateMode==='months')$('#date-summary').textContent=[...selectedMonths].sort().map(m=>{const date=new Date(m+'T12:00:00');return date.toLocaleDateString('ru-RU',{month:'long'})+' '+date.getFullYear()}).join(', ')||'Выберите месяц';
+  const options=[tripType==='RT'?'туда-обратно':tripType==='both'?'в одну сторону и обратно':'в одну сторону'];
+  if(tripType==='RT'&&dateMode!=='dates'){
+    const min=$('#duration-min').value,max=$('#duration-max').value;
+    options.push((min===max?min:min+'–'+max)+' дней');
+  }
+  $('#date-options-summary').textContent=options.join(' · ');
+};
+updateDateSummary();
 $('#date-picker').appendChild($('#duration-fields'));
 const modeKey=draftKey+':mode',aiKey=draftKey+':ai';
 function setSearchMode(mode){searchMode=mode;$('#search-form').classList.toggle('hidden',mode!=='form');$('#ai-form').classList.toggle('hidden',mode!=='ai');document.querySelectorAll('#search-mode-tabs button').forEach(b=>b.classList.toggle('selected',b.dataset.searchMode===mode));try{localStorage.setItem(modeKey,mode)}catch{}}

@@ -1,9 +1,10 @@
 import asyncio
 import logging
 import re
+from pathlib import Path
 from contextlib import suppress
 
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, ReplyKeyboardRemove, MenuButtonWebApp, WebAppInfo
 from telegram.ext import Application, CallbackQueryHandler, MessageHandler, filters
 
 from .api import API
@@ -14,36 +15,67 @@ from .models import Search
 from .monitor import Monitor
 from .storage import Storage
 from .rich_messages import send_search_results
+from .broadcast import Broadcast
+from .statistics import send_info
+from .guide import is_guide_query, send_guide
 
-HELP = """🎫 Помогу найти авиабилеты и отследить снижение цены.
-Напишите откуда, куда и когда, например:
-Москва Сочи завтра
-Москва Питер в декабре прямой 7–9 дней
-Москва Бангкок в начале ноября с багажом до 80000
+HELP = """🎫 Привет! Найду авиабилеты и помогу спланировать поездку.
 
-Можно прислать голосовое сообщение до 20 секунд.
+✈️ Напишите откуда, куда и когда лететь:
+• <code>Москва — Анталья в одну сторону в октябре</code>
+• <code>Москва — Питер на 7–10 дней в ноябре</code>
+• <code>Казань — Стамбул с багажом, только прямые</code>
+• <code>Москва, горящие в октябре</code> — поиск куда угодно
 
-Под результатами нажмите «Отслеживать цену» и выберите порог.
-/alerts — подписки
-/history — последние запросы
-/cancel — отменить ввод своей цены
+Добавляйте даты, длительность, багаж, бюджет и число пересадок. Если месяц не указан, ищу в текущем. Можно прислать голосовое до 20 секунд.
 
-Цены из кэша Travelpayouts: окончательную стоимость проверяйте по ссылке."""
+В результатах — цены, авиакомпании и пересадки. Проверю также прямые рейсы, если они доступны.
+
+🔔 Для конкретного направления нажмите «Отслеживать цены» и задайте порог. Для «Куда угодно» отслеживание недоступно.
+
+🧭 Туристический гид — начните сообщение так:
+• <code>Куда сходить в Стамбуле?</code>
+• <code>Что посмотреть в Анталье?</code>
+• <code>Чем заняться в Сочи?</code>
+• <code>Что попробовать в Грузии?</code>
+• <code>Посоветуй отель в Дубае</code>
+• <code>Составь маршрут по Петербургу на 3 дня</code>
+
+📱 Поиск через форму или AI в мини-аппе:
+https://t.me/bilet_bot?startapp
+
+/alerts — ваши подписки
+/history — история поисков
+/cancel — отменить ввод цены или изменение запроса
+/help — эта инструкция
+
+⏱ Между запросами — 10 секунд, общий лимит для бота и мини-аппа.
+Итоговую стоимость проверяйте по ссылке на билет."""
 
 
 def main():
     config = Config.load()
     storage = Storage(config.database)
+    legacy = Path("list_id.txt")
+    if legacy.is_file():
+        storage.import_users(legacy.read_text(encoding="utf-8-sig").splitlines())
     api = API(config)
+    broadcast = Broadcast(storage, config.admin_id)
     monitor = None
     worker = None
 
     async def startup(app):
         nonlocal monitor, worker
+        await app.bot.set_chat_menu_button(menu_button=MenuButtonWebApp(
+            text="Найти", web_app=WebAppInfo(url="https://biletbot.ru/mini-app")))
         monitor = Monitor(storage, api, app.bot, config)
         worker = asyncio.create_task(monitor.run())
 
     async def shutdown(app):
+        if broadcast.task and not broadcast.task.done():
+            broadcast.task.cancel()
+            with suppress(asyncio.CancelledError):
+                await broadcast.task
         if worker:
             worker.cancel()
             with suppress(asyncio.CancelledError):
@@ -62,6 +94,10 @@ def main():
         query = update.callback_query
         await query.answer()
         uid, cid = query.from_user.id, query.message.chat_id
+        wait = storage.request_wait(uid)
+        if wait:
+            await query.message.reply_text(f"Подождите {wait} сек. Между запросами — 10 секунд.")
+            return
         try:
             parts = query.data.split(":")
             action, sid = parts[0], int(parts[1])
@@ -82,7 +118,9 @@ def main():
                 stopped = storage.stop(sid, uid)
                 await query.message.reply_text("Отслеживание остановлено." if stopped else "Подписка не найдена.")
                 return
-            storage.get_search(sid, uid, cid)
+            search = storage.get_search(sid, uid, cid)
+            if action in ("track", "custom", "price") and search.anywhere:
+                raise ValueError("Отслеживание недоступно для поиска «Куда угодно». Выберите конкретное направление.")
             if action == "edit":
                 base = storage.get_search(sid, uid, cid)
                 storage.set_edit(sid, uid, cid)
@@ -104,6 +142,20 @@ def main():
     async def message(update, context):
         msg = update.effective_message
         uid, cid = update.effective_user.id, update.effective_chat.id
+        command = (msg.text or "").split()[0].split("@")[0] if msg.text else ""
+        if await broadcast.handle(update, context):
+            return
+        remove_keyboard = context.user_data.get("start_keyboard", False) and command not in ("/start", "/help")
+        if remove_keyboard:
+            context.user_data.pop("start_keyboard", None)
+        wait = storage.request_wait(uid)
+        if wait:
+            await msg.reply_text(f"Подождите {wait} сек. Между запросами — 10 секунд.", reply_markup=ReplyKeyboardRemove() if remove_keyboard else None)
+            return
+        if remove_keyboard:
+            await msg.reply_text("Принято.", reply_markup=ReplyKeyboardRemove())
+        if msg.photo:
+            return
         try:
             if msg.voice:
                 if msg.voice.duration > 20:
@@ -121,7 +173,10 @@ def main():
                 return
             command = text.split()[0].split("@")[0]
             if command in ("/start", "/help"):
-                await msg.reply_text(HELP)
+                await msg.reply_text(HELP, parse_mode="HTML", reply_markup=ReplyKeyboardMarkup(
+                    [["Москва — Анталья в одну сторону"], ["Москва — Питер на 7–10 дней"],
+                     ["Что посмотреть в Стамбуле?"]], resize_keyboard=True, one_time_keyboard=True))
+                context.user_data["start_keyboard"] = True
             elif command == "/cancel":
                 with storage.db:
                     storage.clear_pending(uid, cid)
@@ -147,8 +202,7 @@ def main():
                 await msg.reply_text("📋 Последние запросы:\n" + "\n".join(
                     Search.model_validate_json(row["params"]).query for row in history) if history else "История пуста.")
             elif command == "/info" and uid == config.admin_id:
-                searches = storage.db.execute("SELECT COUNT(*), COUNT(DISTINCT user_id) FROM searches").fetchone()
-                await msg.reply_text(f"Запросов: {searches[0]}\nПользователей: {searches[1]}\nАктивных подписок: {len(storage.alerts())}")
+                await send_info(api, cid, storage, config.timezone)
             elif text.startswith("/"):
                 await msg.reply_text(HELP)
             elif storage.pending(uid, cid) is not None:
@@ -158,17 +212,21 @@ def main():
                     raise ValueError("Введите целую цену, например 25000, или /cancel")
                 storage.subscribe(storage.pending(uid, cid), uid, cid, int(match[1]))
                 await msg.reply_text("Отслеживание создано! Сообщу, когда цена станет ниже указанной.")
-            elif storage.pending_edit(uid, cid) is None and re.match(r"^(что посмотреть|куда сходить|чем заняться|что поесть|составь маршрут|что попробовать|посоветуй отель)", text.lower()):
-                answer = await api.llm("Ты дружелюбный тревел-гид. Отвечай только на туристические вопросы, до 1000 символов, без Markdown. В конце предложи помощь с билетами.", text)
-                await msg.reply_text(answer[:3500])
+            elif storage.pending_edit(uid, cid) is None and is_guide_query(text):
+                await send_guide(api, cid, text)
             else:
                 await msg.reply_text("Ищу билеты…")
                 edit_sid = storage.pending_edit(uid, cid)
-                if edit_sid is not None:
-                    base = storage.get_search(edit_sid, uid, cid)
-                    search = await api.edit_search(base, text)
-                else:
-                    search = await api.parse(text)
+                try:
+                    if edit_sid is not None:
+                        base = storage.get_search(edit_sid, uid, cid)
+                        search = await api.edit_search(base, text)
+                    else:
+                        search = await api.parse(text)
+                except Exception as exc:
+                    error = str(exc).replace(config.telegram_token, "[REDACTED]") if isinstance(exc, ValueError) else type(exc).__name__
+                    storage.save_failed_query(uid, "bot-edit" if edit_sid is not None else "bot", text, error)
+                    raise
                 results = []
                 for variant in search.variants():
                     sid = storage.save_search(uid, cid, variant)
@@ -184,7 +242,7 @@ def main():
             await msg.reply_text("Не удалось получить ответ сервиса. Попробуйте позже. Подписки сохранены.")
 
     app.add_handler(CallbackQueryHandler(callback))
-    app.add_handler(MessageHandler(filters.TEXT | filters.VOICE, message))
+    app.add_handler(MessageHandler(filters.TEXT | filters.VOICE | filters.PHOTO, message))
     app.run_polling(allowed_updates=["message", "callback_query"])
 
 

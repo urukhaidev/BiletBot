@@ -13,7 +13,9 @@ renderGroups=function(groups){
   groups.forEach((group,i)=>{
   const cards=[];
   for(let node=headings[i].nextElementSibling;node&&node!==headings[i+1];node=node.nextElementSibling)if(node.classList.contains('ticket'))cards.push(node);
-  cards.forEach((card,index)=>{
+   cards.forEach((card,index)=>{
+    const airline=document.createElement('div');airline.className='ticket-airline';airline.textContent=group.tickets[index].airline||'Авиакомпания не указана';card.querySelector('.ticket-info').appendChild(airline);
+     if(group.anywhere){const route=document.createElement('div');route.className='result-route';route.textContent=group.origin_name+' — '+group.tickets[index].destination_name;card.prepend(route)}
     card.dataset.direct=String(group.tickets[index].direct??(group.tickets[index].transfers==='Прямой рейс'));
     if(card.dataset.direct==='true'){
       card.classList.add('direct-ticket');

@@ -18,6 +18,8 @@ class API:
         self.lock = asyncio.Lock()
         self.city_cache = {}
         self.search_cache = {}
+        self.calendar_cache = {}
+        self.airline_names = None
 
     def today(self):
         return datetime.now(self.config.timezone).date()
@@ -95,7 +97,9 @@ date_from, date_to, month, depart_date_min, depart_date_max (YYYY-MM-DD или n
 duration_min, duration_max (целые числа), direct, baggage (boolean), max_price (целое), max_changes (целое или null).
 max_changes — максимум пересадок: «не больше 1 пересадки», «максимум одна пересадка», «до одной пересадки» → 1;
 «не больше двух пересадок» → 2. Без ограничения null. Прямой рейс → direct=true и max_changes=0.
-Если направления не указаны, верни {{"error":"Укажите откуда и куда лететь"}}.
+Для «куда угодно», «любые направления», «из Казани любые», «Москва горящие» верни anywhere=true, to=null.
+Для такого поиска без явного типа верни trip_type="OW", trip_type_explicit=false (приложение само ищет OW и RT). Исправляй «Моска» на Москва.
+Если город отправления не указан, верни {{"error":"Укажите откуда лететь"}}.
 Исправляй опечатки, Питер = Санкт-Петербург. Не придумывай направления.
 Дни/ночи или туда-обратно означают RT, иначе OW. Длительность по умолчанию 7–10.
 trip_type_explicit=true только если явно сказано в одну сторону, туда-обратно, указаны дни/ночи или дата возврата.
@@ -127,8 +131,19 @@ baggage=true только с багажом. max_price=999999 если цена 
             value = changes_match[1].lower()
             raw["max_changes"] = int(value) if value.isdigit() else {"одной": 1, "одна": 1, "одну": 1, "двух": 2, "две": 2, "трех": 3, "трёх": 3, "три": 3}[value]
         started = monotonic()
-        (origin, origin_name), (destination, destination_name) = await asyncio.gather(
-            self.resolve(raw.pop("from")), self.resolve(raw.pop("to")))
+        anywhere = raw.get("anywhere", False) or bool(re.search(r"куда\s+угодно|любые|горящ", text, re.IGNORECASE))
+        raw["anywhere"] = anywhere
+        if anywhere and not re.search(r"(?:с|можно с)\s+пересад|не\s+(?:больше|более)\s+.+пересад|максимум\s+.+пересад", text, re.IGNORECASE):
+            raw["direct"] = True
+        if anywhere and not raw.get("trip_type_explicit"):
+            raw["trip_type"] = "OW"
+        origin_text, destination_text = raw.pop("from"), raw.pop("to", None)
+        if anywhere:
+            origin, origin_name = await self.resolve(origin_text)
+            destination, destination_name = "ANY", "Куда угодно"
+        else:
+            (origin, origin_name), (destination, destination_name) = await asyncio.gather(
+                self.resolve(origin_text), self.resolve(destination_text))
         logging.getLogger(__name__).warning("Search stage=cities elapsed=%.2fs", monotonic() - started)
         for key in ("date_from", "date_to", "month", "depart_date_min", "depart_date_max"):
             if raw.get(key) == "":
@@ -143,6 +158,8 @@ baggage=true только с багажом. max_price=999999 если цена 
         return search
 
     async def search_flights(self, search, *, all_pages=True):
+        if search.anywhere:
+            return await self.anywhere_flights(search, all_pages=all_pages)
         if not re.search(r"\bегипет\b", search.query, flags=re.IGNORECASE):
             return await self.flights(search, all_pages=all_pages)
         egypt_origin = search.origin == "HRG"
@@ -154,6 +171,92 @@ baggage=true только с багажом. max_price=999999 если цена 
                 ticket["origin_name" if egypt_origin else "destination_name"] = name
             flights.extend(found)
         return sorted(flights, key=lambda t: float(t["value"]))
+
+    async def anywhere_flights(self, search, *, all_pages=True):
+        departure = search.month or search.date_from or search.depart_date_min
+        period = departure.strftime("%Y-%m") if not search.date_from else departure.isoformat()
+        params = dict(origin=search.origin, departure_at=period, unique="true", sorting="route",
+                      direct=str(search.direct).lower(), currency="rub", limit=15, page=1,
+                      one_way=str(search.trip_type == "OW").lower(), token=self.config.travel_token)
+        if search.trip_type == "RT":
+            params["return_at"] = search.date_to.isoformat() if search.date_to else departure.strftime("%Y-%m")
+        found = {}
+        while True:
+            async with self.lock:
+                response = await self.http.get("https://api.travelpayouts.com/aviasales/v3/prices_for_dates", params=params)
+                await asyncio.sleep(self.config.request_interval)
+            if response.is_error:
+                raise ValueError("Не удалось загрузить билеты по любым направлениям")
+            payload = response.json()
+            if not payload.get("success") or not isinstance(payload.get("data"), list):
+                raise ValueError("Travelpayouts вернул ответ без списка билетов")
+            rows = payload["data"]
+            for row in rows:
+                ticket = dict(origin_city_iata=row["origin"], destination_city_iata=row["destination"],
+                              departure_at=row["departure_at"], return_at=row.get("return_at"),
+                              value=row["price"], number_of_changes=row.get("transfers", 0),
+                              duration=row.get("duration", 0), ticket_link=row.get("link", ""), main_airline=row.get("airline", ""))
+                if search.trip_type == "RT":
+                    ticket["number_of_changes"] = max(ticket["number_of_changes"], row.get("return_transfers", 0))
+                code = row["destination"]
+                if search.matches(ticket, self.today()) and (code not in found or ticket["value"] < found[code]["value"]):
+                    found[code] = ticket
+            if not all_pages or len(rows) < 15:
+                break
+            params["page"] += 1
+        for code, ticket in found.items():
+            try:
+                _, ticket["destination_name"] = await self.resolve(code)
+            except (ValueError, httpx.HTTPError):
+                ticket["destination_name"] = code
+        await self.enrich_airlines(list(found.values()))
+        return sorted(found.values(), key=lambda t: float(t["value"]))
+
+    async def prices_for_dates(self, search, month):
+        calendar_search = search.model_copy(update={"month": month, "date_from": None,
+            "depart_date_min": None, "depart_date_max": None, "baggage": False})
+        key = (calendar_search.model_dump_json(), self.today())
+        cached = self.calendar_cache.get(key)
+        if cached and monotonic() - cached[0] < 300:
+            return cached[1]
+        params = dict(origin=search.origin, departure_at=month.strftime("%Y-%m"),
+                      unique="false", sorting="price", direct=str(search.direct).lower(),
+                      currency="rub", limit=1000, page=1,
+                      one_way=str(search.trip_type == "OW").lower(), token=self.config.travel_token)
+        if not search.anywhere:
+            params["destination"] = search.destination
+        if search.trip_type == "RT" and search.date_to:
+            params["return_at"] = search.date_to.isoformat()
+        found = {}
+        while True:
+            async with self.lock:
+                response = await self.http.get("https://api.travelpayouts.com/aviasales/v3/prices_for_dates", params=params)
+                await asyncio.sleep(self.config.request_interval)
+            response.raise_for_status()
+            payload = response.json()
+            if not payload.get("success") or not isinstance(payload.get("data"), list):
+                raise ValueError("Не удалось загрузить календарь цен")
+            rows = payload["data"]
+            for row in rows:
+                ticket = dict(origin_city_iata=row["origin"], destination_city_iata=row["destination"],
+                              departure_at=row["departure_at"], return_at=row.get("return_at"),
+                              value=row["price"], number_of_changes=max(row.get("transfers", 0),
+                                  row.get("return_transfers", 0) if search.trip_type == "RT" else 0))
+                if search.trip_type == "RT" and not ticket["return_at"]:
+                    continue
+                if not calendar_search.matches(ticket, self.today()):
+                    continue
+                day = ticket["departure_at"][:10]
+                if day not in found or float(ticket["value"]) < float(found[day]["value"]):
+                    found[day] = ticket
+            if len(rows) < params["limit"]:
+                break
+            params["page"] += 1
+        tickets = [found[day] for day in sorted(found)]
+        if len(self.calendar_cache) >= 128:
+            self.calendar_cache.clear()
+        self.calendar_cache[key] = (monotonic(), tickets)
+        return tickets
 
     async def edit_search(self, base, changes):
         prompt = """Обнови поисковый запрос авиабилетов по правке пользователя.
@@ -193,7 +296,7 @@ baggage=true только с багажом. max_price=999999 если цена 
                 params.update(trip_duration_min=search.duration_min, trip_duration_max=search.duration_max)
         field = "prices_one_way" if search.trip_type == "OW" else "prices_round_trip"
         arguments = "\n".join(f"{key}: {json.dumps(value)}" for key, value in params.items())
-        fields = "origin_city_iata destination_city_iata departure_at value number_of_changes ticket_link baggage_code trip_duration duration segments { departure_at arrival_at transfers { at to duration_seconds } }"
+        fields = "origin_city_iata destination_city_iata departure_at value number_of_changes main_airline ticket_link baggage_code trip_duration duration segments { departure_at arrival_at transfers { at to duration_seconds } }"
         if search.trip_type == "RT":
             fields += " return_at"
         return field, arguments, fields
@@ -229,7 +332,23 @@ baggage=true только с багажом. max_price=999999 если цена 
                     results.append(ticket)
                     seen.add(key)
         await self.enrich_transfers(results[:20])
+        await self.enrich_airlines(results)
         return sorted(results, key=lambda t: float(t["value"]))
+
+    async def enrich_airlines(self, tickets):
+        if not any(t.get("main_airline") for t in tickets):
+            return
+        if self.airline_names is None:
+            try:
+                response = await self.http.get("https://api.travelpayouts.com/data/ru/airlines.json")
+                response.raise_for_status()
+                self.airline_names = {row["code"]: row.get("name") or row["code"] for row in response.json()}
+            except (httpx.HTTPError, ValueError, KeyError):
+                logging.warning("Airline directory unavailable")
+        for ticket in tickets:
+            code = ticket.get("main_airline")
+            if code:
+                ticket["airline_name"] = (self.airline_names or {}).get(code, code)
 
     async def enrich_transfers(self, tickets):
         codes = {tr.get(key) for t in tickets for segment in t.get("segments", [])

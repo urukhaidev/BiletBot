@@ -11,7 +11,7 @@ from biletbot.rich_messages import rich_blocks, send_search_result, send_search_
 def sample():
     search = Search(origin="MOW", destination="AER", origin_name="Москва", destination_name="Сочи",
                     date_from=date(2027, 11, 10))
-    ticket = dict(departure_at="2027-11-10", value=9000, number_of_changes=0, baggage_code="1PC23", duration=230)
+    ticket = dict(departure_at="2027-11-10", value=9000, number_of_changes=0, baggage_code="1PC23", duration=230, airline_name="Аэрофлот")
     return search, ticket
 
 
@@ -19,7 +19,7 @@ def test_native_table_and_photo_blocks():
     search, ticket = sample()
     blocks = rich_blocks(search, [ticket], "123")
     assert blocks[1]["type"] == "table"
-    assert blocks[1]["cells"][1][0]["text"] == "10 ноября\nПрямой рейс\nВ пути 4 ч\nБагаж 23 кг"
+    assert blocks[1]["cells"][1][0]["text"] == "10 ноября\nПрямой рейс\nВ пути 4 ч\nБагаж 23 кг\nАвиакомпания: Аэрофлот"
     assert blocks[1]["cells"][0][0]["text"] == "Билет"
     assert "Вариант" not in str(blocks)
     assert not any(b["type"] == "photo" for b in blocks)
@@ -35,7 +35,7 @@ def test_roundtrip_dates_and_durations_share_cells():
     blocks = rich_blocks(search, [ticket], "123")
     table = blocks[1]
     assert len(table["cells"][0]) == 2
-    assert table["cells"][1][0]["text"] == "10 ноября — 17 ноября\nПрямой рейс\nВ пути 4 ч / 4 ч\nБагаж 23 кг"
+    assert table["cells"][1][0]["text"] == "10 ноября — 17 ноября\nПрямой рейс\nВ пути 4 ч / 4 ч\nБагаж 23 кг\nАвиакомпания: Аэрофлот"
     assert [c["text"] for c in table["cells"][0]] == ["Билет", "Цена"]
     link = table["cells"][1][1]["text"]
     assert link["type"] == "url"

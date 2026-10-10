@@ -79,6 +79,14 @@ def price_text(ticket):
 
 def select_tickets(search, tickets):
     ordered = sorted(tickets, key=lambda t: float(t["value"]))
+    if search.anywhere:
+        selected, seen = [], set()
+        for ticket in ordered:
+            code = ticket["destination_city_iata"]
+            if code not in seen:
+                selected.append(ticket)
+                seen.add(code)
+        return selected
     if not ordered:
         return []
     # Prefer fewer transfers within a 5% premium; preserve price order outside it.
@@ -125,6 +133,11 @@ def select_tickets(search, tickets):
     return selected
 
 
+def airline_text(ticket):
+    name = ticket.get("airline_name") or ticket.get("main_airline") or ticket.get("airline")
+    return f"Авиакомпания: {name}" if name else "Авиакомпания не указана"
+
+
 def ticket_text(search, ticket, marker):
     departing = ticket["departure_at"][:10]
     returning = (ticket.get("return_at") or "")[:10]
@@ -137,7 +150,7 @@ def ticket_text(search, ticket, marker):
     link = f"https://www.aviasales.ru/search/{origin}{ddmm}{destination}{tail}?" + urlencode({"marker": marker})
     return (f"🎫 <b>{escape(ticket.get('origin_name', search.origin_name))} — {escape(ticket.get('destination_name', search.destination_name))}</b>\n"
             f"{dates}\n<b>{price_text(ticket)}</b>\n"
-            f"{escape(baggage_text(ticket.get('baggage_code')))}\n"
+            f"{escape(airline_text(ticket))}\n{escape(baggage_text(ticket.get('baggage_code')))}\n"
             f"В пути: {escape(duration_text(ticket))}\n{escape(transfer_text(ticket))}\n"
             f"<a href=\"{escape(link, quote=True)}\">Открыть билет</a>")
 

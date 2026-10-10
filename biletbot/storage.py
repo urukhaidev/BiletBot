@@ -12,6 +12,18 @@ class Storage:
         self.db.executescript("""
             PRAGMA journal_mode=WAL;
             PRAGMA foreign_keys=ON;
+            CREATE TABLE IF NOT EXISTS failed_queries (
+                id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL,
+                source TEXT NOT NULL, query TEXT NOT NULL, error TEXT NOT NULL,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP
+            );
+            CREATE TABLE IF NOT EXISTS request_limits (
+                user_id INTEGER PRIMARY KEY, requested_at REAL NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS users (
+                user_id INTEGER PRIMARY KEY, active INTEGER NOT NULL DEFAULT 1,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP
+            );
             CREATE TABLE IF NOT EXISTS searches (
                 id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL, chat_id INTEGER NOT NULL,
                 params TEXT NOT NULL, created_at TEXT DEFAULT CURRENT_TIMESTAMP
@@ -42,6 +54,45 @@ class Storage:
                 PRIMARY KEY(user_id, chat_id)
             );
         """)
+        with self.db:
+            self.db.execute("INSERT OR IGNORE INTO users(user_id) SELECT DISTINCT user_id FROM searches WHERE user_id>0 AND user_id=chat_id")
+
+    def import_users(self, lines):
+        ids = {int(line.strip()) for line in lines if line.strip().lstrip("-").isdigit() and int(line.strip()) > 0}
+        before = self.db.total_changes
+        with self.db:
+            self.db.executemany("INSERT OR IGNORE INTO users(user_id) VALUES (?)", ((uid,) for uid in ids))
+        return self.db.total_changes - before
+
+    def save_failed_query(self, user_id, source, query, error):
+        with self.db:
+            self.db.execute("INSERT INTO failed_queries(user_id,source,query,error) VALUES (?,?,?,?)",
+                            (user_id, source, query, str(error)[:2000]))
+
+    def request_wait(self, uid, now=None):
+        import math
+        import time
+        now = time.time() if now is None else now
+        with self.db:
+            cursor = self.db.execute("""INSERT INTO request_limits(user_id,requested_at) VALUES (?,?)
+                ON CONFLICT(user_id) DO UPDATE SET requested_at=excluded.requested_at
+                WHERE request_limits.requested_at<=excluded.requested_at-10""", (uid, now))
+            if cursor.rowcount:
+                return 0
+            last = self.db.execute("SELECT requested_at FROM request_limits WHERE user_id=?", (uid,)).fetchone()[0]
+            return max(1, math.ceil(10 - (now - last)))
+
+    def register_user(self, uid):
+        if uid > 0:
+            with self.db:
+                self.db.execute("INSERT INTO users(user_id) VALUES (?) ON CONFLICT(user_id) DO UPDATE SET active=1", (uid,))
+
+    def broadcast_users(self):
+        return [row[0] for row in self.db.execute("SELECT user_id FROM users WHERE active=1 ORDER BY user_id")]
+
+    def deactivate_user(self, uid):
+        with self.db:
+            self.db.execute("UPDATE users SET active=0 WHERE user_id=?", (uid,))
 
     def save_card(self, sid, ticket):
         import json
@@ -72,6 +123,8 @@ class Storage:
 
     def save_search(self, user_id, chat_id, search: Search):
         with self.db:
+            if user_id == chat_id and user_id > 0:
+                self.db.execute("INSERT INTO users(user_id) VALUES (?) ON CONFLICT(user_id) DO UPDATE SET active=1", (user_id,))
             return self.db.execute("INSERT INTO searches(user_id,chat_id,params) VALUES (?,?,?)",
                                    (user_id, chat_id, search.model_dump_json())).lastrowid
 
@@ -83,7 +136,8 @@ class Storage:
         return Search.model_validate_json(row["params"])
 
     def subscribe(self, sid, user_id, chat_id, price):
-        self.get_search(sid, user_id, chat_id)
+        if self.get_search(sid, user_id, chat_id).anywhere:
+            raise ValueError("Отслеживание недоступно для поиска «Куда угодно». Выберите конкретное направление.")
         if not 0 < price < 1000000:
             raise ValueError("Введите целую цену от 1 до 999999 ₽")
         with self.db:
@@ -93,7 +147,8 @@ class Storage:
             self.clear_pending(user_id, chat_id)
 
     def set_pending(self, sid, user_id, chat_id):
-        self.get_search(sid, user_id, chat_id)
+        if self.get_search(sid, user_id, chat_id).anywhere:
+            raise ValueError("Отслеживание недоступно для поиска «Куда угодно». Выберите конкретное направление.")
         with self.db:
             self.clear_edit(user_id, chat_id)
             self.db.execute("INSERT OR REPLACE INTO pending VALUES (?,?,?)", (user_id, chat_id, sid))

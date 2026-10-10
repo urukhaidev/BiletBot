@@ -13,6 +13,84 @@ def config():
     return SimpleNamespace(travel_token="test", request_interval=0)
 
 
+async def test_price_calendar_groups_days_filters_and_caches():
+    api = API(config())
+    api.today = lambda: date(2027, 1, 10)
+    await api.http.aclose()
+    requests = []
+    def respond(request):
+        requests.append(request)
+        assert request.url.path == "/aviasales/v3/prices_for_dates"
+        assert request.url.params["departure_at"] == "2027-01"
+        assert request.url.params["destination"] == "AER"
+        assert request.url.params["one_way"] == "true"
+        assert "return_at" not in request.url.params
+        base = dict(origin="MOW", destination="AER", price=5000, transfers=0, return_at=None)
+        return httpx.Response(200, json={"success": True, "data": [
+            {**base, "departure_at": "2027-01-15T10:00:00+03:00"},
+            {**base, "departure_at": "2027-01-15T11:00:00+03:00", "price": 4000},
+            {**base, "departure_at": "2027-01-16", "transfers": 2},
+            {**base, "departure_at": "2027-01-09"},
+            {**base, "departure_at": "2027-02-01"},
+        ]})
+    api.http = httpx.AsyncClient(transport=httpx.MockTransport(respond))
+    search = Search(origin="MOW", destination="AER", origin_name="Москва", destination_name="Сочи",
+                    date_from=date(2027, 1, 20), baggage=True, max_changes=1)
+    try:
+        tickets = await api.prices_for_dates(search, date(2027, 1, 1))
+        assert len(tickets) == 1
+        assert tickets[0]["value"] == 4000
+        assert tickets[0]["departure_at"].startswith("2027-01-15")
+        assert await api.prices_for_dates(search, date(2027, 1, 1)) == tickets
+        assert len(requests) == 1
+    finally:
+        await api.http.aclose()
+
+
+async def test_roundtrip_price_calendar_keeps_duration_and_return_filters():
+    api = API(config())
+    api.today = lambda: date(2027, 1, 1)
+    await api.http.aclose()
+    def respond(request):
+        assert request.url.params["one_way"] == "false"
+        base = dict(origin="MOW", destination="AER", price=6000, transfers=0, departure_at="2027-01-30")
+        return httpx.Response(200, json={"success": True, "data": [
+            {**base, "return_at": "2027-02-07"},
+            {**base, "return_at": "2027-02-07", "price": 3000, "return_transfers": 2},
+            {**base, "return_at": "2027-02-15", "price": 2000},
+            {**base, "return_at": None, "price": 1000},
+        ]})
+    api.http = httpx.AsyncClient(transport=httpx.MockTransport(respond))
+    search = Search(origin="MOW", destination="AER", origin_name="Москва", destination_name="Сочи",
+                    month=date(2027, 1, 1), trip_type="RT", direct=True, duration_min=7, duration_max=10)
+    try:
+        tickets = await api.prices_for_dates(search, date(2027, 1, 1))
+        assert [t["value"] for t in tickets] == [6000]
+        exact = search.model_copy(update={"month": None, "date_from": date(2027, 1, 30), "date_to": date(2027, 2, 15)})
+        assert [t["value"] for t in await api.prices_for_dates(exact, date(2027, 1, 1))] == [2000]
+    finally:
+        await api.http.aclose()
+
+
+async def test_airline_names_are_resolved_and_cached():
+    api = API(config())
+    await api.http.aclose()
+    requests = []
+    def respond(request):
+        requests.append(request)
+        return httpx.Response(200, json=[{"code": "SU", "name": "Аэрофлот"}])
+    api.http = httpx.AsyncClient(transport=httpx.MockTransport(respond))
+    try:
+        tickets = [{"main_airline": "SU"}, {"main_airline": "ZZ"}]
+        await api.enrich_airlines(tickets)
+        await api.enrich_airlines(tickets)
+        assert tickets[0]["airline_name"] == "Аэрофлот"
+        assert tickets[1]["airline_name"] == "ZZ"
+        assert len(requests) == 1
+    finally:
+        await api.http.aclose()
+
+
 async def test_structured_llm_includes_router_json_marker():
     import json
 

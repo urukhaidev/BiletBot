@@ -11,6 +11,7 @@ class Search(BaseModel):
     destination: str = Field(pattern=r"^[A-Z]{3}$")
     origin_name: str
     destination_name: str
+    anywhere: bool = False
     trip_type: Literal["OW", "RT"] = "OW"
     trip_type_explicit: bool = True
     date_from: date | None = None
@@ -64,7 +65,7 @@ class Search(BaseModel):
         departure = date.fromisoformat(ticket["departure_at"][:10])
         if departure < today:
             return False
-        if ticket["origin_city_iata"] != self.origin or ticket["destination_city_iata"] != self.destination:
+        if ticket["origin_city_iata"] != self.origin or (not self.anywhere and ticket["destination_city_iata"] != self.destination):
             return False
         if self.date_from and departure != self.date_from:
             return False
@@ -82,6 +83,8 @@ class Search(BaseModel):
             return False
         if self.trip_type == "RT":
             returning = date.fromisoformat(ticket["return_at"][:10])
+            if self.anywhere:
+                return returning > departure and (returning.year, returning.month) == (departure.year, departure.month)
             if self.date_to:
                 return returning == self.date_to
             duration = ticket.get("trip_duration")
