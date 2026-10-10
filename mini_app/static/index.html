@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#edf3fb"><title>Bilet Bot · Поиск билетов</title>
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  <link rel="stylesheet" href="/mini-app/static/style.css">
+   <link rel="stylesheet" href="/mini-app/static/layout.css?v=4">
+   <link rel="stylesheet" href="/mini-app/static/compact-dates.css?v=5">
+  <link rel="stylesheet" href="/mini-app/static/dense.css?v=1">
+   <link rel="stylesheet" href="/mini-app/static/search-modes.css?v=4">
+   <script defer src="/mini-app/static/app.js?v=2"></script>
+  <script defer src="/mini-app/static/history.js?v=2"></script>
+   <script defer src="/mini-app/static/results-flow.js?v=2"></script>
+   <script defer src="/mini-app/static/result-layout.js?v=3"></script>
+   <script defer src="/mini-app/static/search-modes.js?v=3"></script>
+  <script defer src="/mini-app/static/ux.js?v=1"></script>
+  <script defer src="/mini-app/static/search-button.js?v=1"></script>
+   <link rel="stylesheet" href="/mini-app/static/search-button.css?v=3">
+  <link rel="stylesheet" href="/mini-app/static/ux.css?v=1">
+  <link rel="stylesheet" href="/mini-app/static/theme-polish.css?v=1">
+</head>
+<body>
+<div class="orb orb-one"></div><div class="orb orb-two"></div>
+<main>
+   <header><a class="brand" href="#search">bilet<span>bot</span><span class="brand-dot">✦</span></a><button id="theme-toggle" type="button" aria-label="Переключить тему">☾</button></header>
+  <section id="search" class="page active">
+    <div class="hero"><h1>Куда полетим<span>?</span></h1><p>Выберите направление. Мы найдём выгодные даты.</p></div>
+    <div id="outside" class="notice hidden">Для поиска и доступа к подпискам откройте приложение в Telegram. <a id="open-bot" href="https://t.me/dae110_bot">Открыть бота ↗</a></div>
+    <div id="search-mode-tabs" class="segmented"><button type="button" data-search-mode="ai">✦ AI-поиск</button><button type="button" data-search-mode="form" class="selected">Форма</button></div>
+    <form id="ai-form" class="panel hidden"><label for="ai-query">Опишите поездку своими словами</label><textarea id="ai-query" rows="4" maxlength="1000" placeholder="Сочи Мальдивы в ноябре на 7–15 дней с багажом" required></textarea><button id="ai-submit" type="submit" class="primary">Найти с AI ↗</button>
+      <div id="ai-ideas"><p>Идеи для поиска</p>
+        <button type="button" data-query="Москва — Сочи в следующем месяце на 7–10 дней, только прямые рейсы">Москва → Сочи · на неделю</button>
+        <button type="button" data-query="Санкт-Петербург — Стамбул в следующем месяце на 3–5 дней с багажом">Петербург → Стамбул · короткая поездка</button>
+        <button type="button" data-query="Москва — Дубай через месяц на 7–10 дней, не больше одной пересадки">Москва → Дубай · на 7–10 дней</button>
+        <button type="button" data-query="Екатеринбург — Пхукет через два месяца на 10–14 дней с багажом">Екатеринбург → Пхукет · к морю</button>
+        <button type="button" data-query="Сочи — Мале через два месяца на 7–15 дней с багажом">Сочи → Мальдивы · на 7–15 дней</button>
+      </div>
+    </form>
+    <form id="search-form" class="panel unified-form">
+      <div class="route-panel">
+        <div class="field autocomplete"><input id="origin" placeholder="Откуда" aria-label="Откуда" autocomplete="off" required maxlength="100"><div class="suggestions" id="origin-options"></div></div>
+        <button type="button" id="swap" class="swap" aria-label="Поменять города местами">⇄</button>
+        <div class="field autocomplete"><input id="destination" placeholder="Куда" aria-label="Куда" autocomplete="off" required maxlength="100"><div class="suggestions" id="destination-options"></div></div>
+      </div>
+      <div class="form-section">
+        <div class="segmented hidden" id="trip-tabs"><button type="button" data-trip="OW" class="selected">В одну сторону</button><button type="button" data-trip="RT">Туда-обратно</button></div>
+        <details id="date-picker"><summary><span>Когда</span><b id="date-summary">Выберите даты</b><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="5" width="18" height="16" rx="2"/><path d="M16 3v4M8 3v4M3 11h18"/></svg></summary>
+        <div class="segmented" id="date-tabs"><button type="button" data-mode="months" class="selected">Месяцы</button><button type="button" data-mode="dates">Даты</button><button type="button" data-mode="range">Диапазон</button></div>
+        <div id="months-mode"><p class="hint">Можно выбрать несколько месяцев</p><div id="months" class="month-grid"></div></div>
+        <div id="dates-mode" class="hidden date-grid"><div class="field"><label id="departure-label" for="departure">Вылет</label><input id="departure" type="date"></div><div id="return-field" class="field hidden"><label for="returning">Обратно · опционально</label><input id="returning" type="date"></div><div id="range-field" class="field hidden"><label for="range-end">Вылет до</label><input id="range-end" type="date"></div></div>
+        <label class="toggle-row"><span><b>Добавить обратный билет</b><small id="return-hint">Выберите длительность поездки</small></span><input id="add-return" type="checkbox" role="switch"><span class="toggle"></span></label>
+        </details>
+      </div>
+      <div class="form-section">
+        <div id="duration-fields" class="duration-row"><span>Длительность поездки <small>для туда-обратно</small></span><label><input id="duration-min" type="number" min="1" max="365" value="7" aria-label="Минимум дней"> — <input id="duration-max" type="number" min="1" max="365" value="10" aria-label="Максимум дней"> <span>дней</span></label></div>
+        <label class="toggle-row"><span><b>Только прямые</b><small>Без пересадок</small></span><input id="direct" type="checkbox" role="switch"><span class="toggle"></span></label>
+        <label class="toggle-row"><span><b>С багажом</b><small>Зарегистрированный багаж включён</small></span><input id="baggage" type="checkbox" role="switch"><span class="toggle"></span></label>
+      </div>
+      <button id="submit" class="primary" type="submit"><span>Найти билеты</span><span>↗</span></button>
+      <p class="form-note">Результаты появятся здесь и придут в Telegram</p>
+    </form>
+    <div id="status" class="status hidden" role="status"></div><div id="results"></div>
+  </section>
+   <section id="history" class="page"><div class="hero"><h1>История</h1><p>Повторите поиск или откройте сохранённые билеты.</p></div><div id="history-list"></div></section>
+   <section id="alerts" class="page"><div class="hero"><h1>Мои алерты</h1><p>Сообщим, когда билет станет дешевле.</p></div><div class="notice">Создавайте уведомления кнопкой «Отслеживать цену» под результатами в боте.</div><div id="alerts-list"></div><button class="primary to-bot">Открыть бота ↗</button></section>
+  <section id="profile" class="page"><div class="hero"><h1>Мой профиль</h1></div><div id="profile-content"></div></section>
+</main>
+<nav class="glass-nav" aria-label="Навигация">
+  <button data-page="search" class="active"><svg viewBox="0 0 24 24"><circle cx="10.8" cy="10.8" r="6.8"/><path d="m16 16 5 5"/></svg><span>Поиск</span></button>
+  <button data-page="history"><svg viewBox="0 0 24 24"><path d="M3 11a9 9 0 1 1 3 8M3 4v7h7M12 7v5l3 2"/></svg><span>История</span></button>
+  <button data-page="alerts"><svg viewBox="0 0 24 24"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9M10 21h4"/></svg><span>Алерты</span></button>
+  <button data-page="profile"><svg viewBox="0 0 24 24"><circle cx="12" cy="8" r="4"/><path d="M4 22v-3a8 8 0 0 1 16 0v3"/></svg><span>Профиль</span></button>
+</nav>
+</body></html>

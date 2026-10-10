@@ -1,0 +1,13 @@
+[Unit]
+Description=BiletBot Telegram Mini App
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+WorkingDirectory=/root/biletbot
+ExecStart=/root/biletbot/.venv/bin/python -m uvicorn mini_app.server:app --host 127.0.0.1 --port 8078 --no-access-log
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
